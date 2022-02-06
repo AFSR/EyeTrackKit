@@ -14,7 +14,7 @@ import os
 
 @available(iOS 13.0, *)
 public class EyeTrack: ObservableObject {
-    var bufferLookAtPosition: [CGPoint] = []
+    public var bufferLookAtPosition: [CGPoint] = []
     @Published public var lookAtPosition: CGPoint = CGPoint(x: 0, y: 0)
     @Published public var lookAtPoint: CGPoint = CGPoint(x: 0, y: 0)
     @Published public var device: Device

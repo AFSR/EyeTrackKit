@@ -1,0 +1,48 @@
+# XcodeGen project description.
+# Install: brew install xcodegen
+# Generate: cd EyeTrackCollisionGame && xcodegen generate
+# Then open EyeTrackCollisionGame.xcodeproj in Xcode and run on a TrueDepth
+# device (iPhone X or newer, iPad Pro 11"/12.9").
+
+name: EyeTrackCollisionGame
+options:
+  bundleIdPrefix: dev.example
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+# EyeTrackKit is referenced as a local Swift package sitting next to this
+# project (see README). Adjust the path if you place the repos elsewhere.
+packages:
+  EyeTrackKit:
+    path: ../EyeTrackKit
+
+targets:
+  EyeTrackCollisionGame:
+    type: application
+    platform: iOS
+    sources:
+      - path: EyeTrackCollisionGame
+        excludes:
+          - "Resources/Info.plist"
+    resources:
+      - path: EyeTrackCollisionGame/Resources
+    info:
+      path: EyeTrackCollisionGame/Resources/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.example.eyetrackcollisiongame
+        INFOPLIST_FILE: EyeTrackCollisionGame/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_EMIT_LOC_STRINGS: YES
+        ENABLE_PREVIEWS: YES
+    dependencies:
+      - package: EyeTrackKit

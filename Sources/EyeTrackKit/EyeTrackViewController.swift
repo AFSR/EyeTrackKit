@@ -8,19 +8,19 @@
 import UIKit
 import SceneKit
 import ARKit
-import WebKit
-import ARVideoKit
 
 open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
     public private(set) var sceneView: ARSCNView!
     public private(set) var eyeTrack: EyeTrack!
-    public private(set) var recorder: RecordAR?
+    public private(set) var recorder: EyeTrackRecorder?
     public var isHidden: Bool = true
 
     private var sync: EyeTrackSceneSync!
 
-    public func initialize(isHidden: Bool = true, eyeTrack: EyeTrack) {
+    public func initialize(isHidden: Bool = true,
+                           eyeTrack: EyeTrack,
+                           recorderConfiguration: EyeTrackRecorder.Configuration = .default) {
         self.isHidden = isHidden
         self.eyeTrack = eyeTrack
 
@@ -35,8 +35,9 @@ open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessio
         sceneView.rendersContinuously = true
 
         eyeTrack.registerSceneView(sceneView: sceneView)
-        recorder = RecordAR(ARSceneKit: sceneView)
-        sync = EyeTrackSceneSync(eyeTrack: eyeTrack, sceneView: sceneView)
+        let recorder = EyeTrackRecorder(sceneView: sceneView, configuration: recorderConfiguration)
+        self.recorder = recorder
+        sync = EyeTrackSceneSync(eyeTrack: eyeTrack, sceneView: sceneView, recorder: recorder)
     }
 
     public func hide() {
@@ -48,11 +49,24 @@ open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessio
     }
 
     public func startRecord() {
-        recorder?.record()
+        do {
+            try recorder?.startRecording()
+        } catch {
+            print("EyeTrackKit recorder start failed: \(error)")
+        }
     }
 
-    public func stopRecord() {
-        recorder?.stopAndExport()
+    public func stopRecord(finished: @escaping (URL) -> Void = { _ in },
+                           isExport: Bool = true) {
+        if isExport {
+            recorder?.stopAndExport { url, _ in
+                if let url { finished(url) }
+            }
+        } else {
+            recorder?.stop { url in
+                if let url { finished(url) }
+            }
+        }
     }
 
     open override func viewDidLoad() {
@@ -66,13 +80,11 @@ open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessio
         if ARFaceTrackingConfiguration.supportsWorldTracking {
             configuration.isWorldTrackingEnabled = true
         }
-        recorder?.prepare(configuration)
         sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     }
 
     open override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        recorder?.rest()
         sceneView.session.pause()
     }
 
@@ -82,10 +94,14 @@ open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessio
     open func sessionWasInterrupted(_ session: ARSession) { }
     open func sessionInterruptionEnded(_ session: ARSession) { }
 
+    public func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        sync.handleSession(didUpdate: frame)
+    }
+
     // Override hook for subclasses to react to anchor updates.
     open func updateViewWithUpdateAnchor() { }
 
-    // MARK: - ARSCNViewDelegate
+    // MARK: - ARSCNViewDelegate / SCNSceneRendererDelegate
 
     public func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
         sync.handleAdd(node: node, anchor: anchor)
@@ -97,5 +113,11 @@ open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessio
 
     public func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         sync.handleSceneTick()
+    }
+
+    public func renderer(_ renderer: SCNSceneRenderer,
+                         didRenderScene scene: SCNScene,
+                         atTime time: TimeInterval) {
+        sync.handleDidRenderScene(at: time)
     }
 }

@@ -2,10 +2,16 @@
 //  EyeTrackSceneSync.swift
 //
 //
-//  Shared ARSCNViewDelegate logic used by both EyeTrackView.Coordinator and
-//  EyeTrackViewController. Eliminates the duplication that previously existed
-//  across both call sites and adds frame-coalescing on the main queue to
-//  prevent update jobs from piling up under load.
+//  Shared ARSCNViewDelegate / ARSessionDelegate / SCNSceneRendererDelegate
+//  logic used by both EyeTrackView.Coordinator and EyeTrackViewController.
+//
+//  Replaces the previous ARVideoKit-driven `RenderARDelegate` callback with
+//  Apple-native sources:
+//    - Raw camera buffers come from `ARSession.didUpdate(frame:)`
+//    - Recording frames are pulled in `renderer(_:didRenderScene:atTime:)`
+//
+//  Updates to `EyeTrack` are coalesced on the main queue so the queue cannot
+//  accumulate a backlog of stale anchors at 60+ fps.
 //
 
 import Foundation
@@ -15,19 +21,19 @@ import SceneKit
 final class EyeTrackSceneSync {
     private weak var eyeTrack: EyeTrack?
     private weak var sceneView: ARSCNView?
+    var recorder: EyeTrackRecorder?
 
-    /// Atomic flag — true while an update is enqueued on the main queue.
-    /// We coalesce by overwriting `pendingAnchor` and skipping a new dispatch.
-    /// At 60+ fps this trades a missed intermediate frame for a guarantee
-    /// that the main queue never accumulates a backlog of stale updates.
     private let lock = NSLock()
     private var pendingAnchor: ARFaceAnchor?
     private var dispatchInFlight = false
 
-    init(eyeTrack: EyeTrack, sceneView: ARSCNView) {
+    init(eyeTrack: EyeTrack, sceneView: ARSCNView, recorder: EyeTrackRecorder? = nil) {
         self.eyeTrack = eyeTrack
         self.sceneView = sceneView
+        self.recorder = recorder
     }
+
+    // MARK: - SCNSceneRendererDelegate
 
     func handleAdd(node: SCNNode, anchor: ARAnchor) {
         eyeTrack?.face.node.transform = node.transform
@@ -48,14 +54,26 @@ final class EyeTrackSceneSync {
         eyeTrack?.device.node.transform = pov.transform
     }
 
-    func handleFrame(buffer: CVPixelBuffer) {
-        // Pixel buffer callbacks fire from ARKit's render thread. The handler
-        // is user-supplied and may touch UI state, so we hop to main but
-        // do not coalesce here — typically the user wants every frame.
+    /// Called from `renderer(_:didRenderScene:atTime:)` on the SceneKit render
+    /// thread. Pulls a frame into the recorder's writer pipeline.
+    func handleDidRenderScene(at time: TimeInterval) {
+        recorder?.captureFrame(at: time)
+    }
+
+    // MARK: - ARSessionDelegate
+
+    /// Replaces ARVideoKit's `RenderARDelegate.frame(didRender:with:using:)`
+    /// callback. ARSession exposes the raw camera buffer as `frame.capturedImage`.
+    func handleSession(didUpdate frame: ARFrame) {
+        let buffer = frame.capturedImage
+        // User callback often touches UI, so hop to main. Not coalesced —
+        // typical consumers want every camera frame.
         DispatchQueue.main.async { [weak self] in
             self?.eyeTrack?.updateFrame(pixelBuffer: buffer)
         }
     }
+
+    // MARK: - Coalesced face-anchor dispatch
 
     private func scheduleUpdate(with anchor: ARFaceAnchor) {
         lock.lock()

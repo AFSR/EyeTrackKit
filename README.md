@@ -10,53 +10,71 @@ EyeTrackKit
     - lookAtPoint on device screen
     - blink
     - distance
-- Record video while acquiring data
-
-## Example Projects
-To try the example project, simply clone this repository and open the `Examples` folder 
+    - tracking confidence (multi-source gaze fusion)
+- Record AR scene to video (built-in `AVAssetWriter` + Metal pipeline, no third-party dependency)
 
 ## Compatibility
-`EyeTrackKit` is compatible on iOS devices that support [`ARKit`](https://developer.apple.com/documentation/arkit).
+`EyeTrackKit` is compatible on iOS devices that support [`ARKit`](https://developer.apple.com/documentation/arkit) face tracking (TrueDepth camera required).
 
 `EyeTrackKit` requires:
-- Swift UI
-- iOS 13
-- Swift 5.3 or higher
-
-## Develop Environment
-- Language: [Swift](https://developer.apple.com/jp/swift/)
-- Xcode: Xcode version 12.0.1 (12A7300)
-- Libralies:
-  - [ARKit](https://developer.apple.com/jp/documentation/arkit/)
-  - [ARVideoKit](https://github.com/AFathi/ARVideoKit)
-
+- SwiftUI
+- iOS 16+
+- Swift 5.9 or higher
 
 ## Installation
-### Swift Package Manager (available Xcode 11.2 and forward)
+### Swift Package Manager
 
-1. In Xcode, select File > Swift Packages > Add Package Dependency.
-2. Follow the prompts using the URL for this repository.
+1. In Xcode, select File > Add Package Dependencies…
+2. Use this repository's URL.
 
-###  [ARVideoKit](https://github.com/AFathi/ARVideoKit)'s settings (This is reference by ARVideoKit's README.md)
-1. Make sure you add the usage description of the `camera`, `microphone`, and `photo library` in the app's `Info.plist`.
+EyeTrackKit has **zero external dependencies** — only Apple frameworks
+(`ARKit`, `SceneKit`, `AVFoundation`, `Metal`, `Photos`, `SwiftUI`).
+
+### Required Info.plist usage descriptions
 ```
 <key>NSCameraUsageDescription</key>
-<string>AR Camera</string>
+<string>AR face tracking</string>
 <key>NSPhotoLibraryAddUsageDescription</key>
-<string>Export AR Media</string>
-<key>NSPhotoLibraryUsageDescription</key>
-<string>Export AR Media</string>
+<string>Save AR session recordings</string>
 <key>NSMicrophoneUsageDescription</key>
-<string>Audiovisual Recording</string>
+<string>(only if you add audio recording)</string>
 ```
-2.  `import ARVideoKit` in the application delegate `AppDelegate.swift` and a `UIViewController` with an `ARKit` scene.
 
-3. In the application delegate `AppDelegate.swift`, add this 👇 in order to allow the framework access and identify the supported device orientations. **Recommended** if the application supports landscape orientations.
+## Recording
+
+The built-in `EyeTrackRecorder` captures the rendered `ARSCNView` content
+directly via `SCNRenderer` and `AVAssetWriter`. Frames are pulled from a
+pre-warmed IOSurface-backed `CVPixelBufferPool` and rendered to a
+zero-copy Metal texture, so capture is GPU-bound and does not stall the
+main thread.
+
+Default codec is HEVC at 6 Mbps. Override via
+`EyeTrackRecorder.Configuration` when constructing the view:
+
+```swift
+EyeTrackController(
+    device: Device(type: .iPhone15Pro),
+    smoothingRange: 5,
+    blinkThreshold: 0.5,
+    isHidden: false
+)
 ```
-func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-    return ViewAR.orientation
-}
-```
+
+## Gaze tracking
+
+`GazeEstimator` fuses three TrueDepth-derived signals per frame:
+
+1. Geometric raycast through each pupil (legacy method)
+2. `ARFaceAnchor.lookAtPoint` — Apple's native gaze hint
+3. Eye yaw/pitch reconstructed from `eyeLookIn/Out/Up/Down` blend shapes
+
+Each estimate is fed to a per-axis 1-D Kalman filter, and outliers are
+down-weighted using the inter-source median distance. The resulting
+`trackingConfidence` (0…1) is exposed on `EyeTrack` and `EyeTrackInfo`.
+
+## Develop Environment
+- Language: [Swift](https://developer.apple.com/swift/)
+- Frameworks: [ARKit](https://developer.apple.com/documentation/arkit/), AVFoundation, Metal, SceneKit
 
 ## Licence
 [MIT](https://github.com/ukitomato/EyeTrackKit/blob/master/LICENSE)

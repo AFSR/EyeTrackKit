@@ -11,13 +11,9 @@ let package = Package(
             name: "EyeTrackKit",
             targets: ["EyeTrackKit"]),
     ],
-    dependencies: [
-        .package(url: "https://github.com/AFathi/ARVideoKit", from: "1.6.0"),
-    ],
     targets: [
         .target(
-            name: "EyeTrackKit",
-            dependencies: ["ARVideoKit"]),
+            name: "EyeTrackKit"),
         .testTarget(
             name: "EyeTrackKitTests",
             dependencies: ["EyeTrackKit"]),

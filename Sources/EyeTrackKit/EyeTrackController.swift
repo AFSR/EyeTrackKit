@@ -12,120 +12,149 @@ import ARKit
 import SceneKit
 import os
 
-@available(iOS 13.0, *)
-public class EyeTrackController: ObservableObject {
+public final class EyeTrackController: ObservableObject {
     public struct Params {
-        var device: Device
-        var smoothingRange: Int
-        var blinkThreshold: Float
-        var isHidden: Bool = true
+        public var device: Device
+        public var smoothingRange: Int
+        public var blinkThreshold: Float
+        public var isHidden: Bool
 
-        var description: [String: String] { ["device": "\(device.type.rawValue)", "smoothing_range": "\(smoothingRange)", "blink_threshold": "\(blinkThreshold)", "is_hidden": "\(isHidden)"] }
+        public init(device: Device,
+                    smoothingRange: Int,
+                    blinkThreshold: Float,
+                    isHidden: Bool = true) {
+            self.device = device
+            self.smoothingRange = smoothingRange
+            self.blinkThreshold = blinkThreshold
+            self.isHidden = isHidden
+        }
+
+        var description: [String: String] {
+            ["device": "\(device.type.rawValue)",
+             "smoothing_range": "\(smoothingRange)",
+             "blink_threshold": "\(blinkThreshold)",
+             "is_hidden": "\(isHidden)"]
+        }
     }
 
     @Published public var eyeTrack: EyeTrack
-    private var _view: EyeTrackView?
-    @Published public var isHidden: Bool?
-    private var sceneView: ARSCNView? = nil
-    var anyCancellable: AnyCancellable? = nil
-    private var logger: Logger = Logger(subsystem: "dev.ukitomato.EyeTrackKit", category: "EyeTrackController")
+    @Published public var isHidden: Bool
+
+    private var cachedView: EyeTrackView?
+    private var cancellable: AnyCancellable?
     private var params: Params
 
+    private let logger = Logger(subsystem: "dev.ukitomato.EyeTrackKit", category: "EyeTrackController")
+
     public var onUpdate: (EyeTrackInfo?) -> Void {
-        get {
-            return self.eyeTrack.onUpdate
-        }
-        set {
-            self.eyeTrack.onUpdate = newValue
-        }
+        get { eyeTrack.onUpdate }
+        set { eyeTrack.onUpdate = newValue }
     }
-    
+
     public var onUpdateFrame: (CVPixelBuffer?) -> Void {
-        get {
-            return self.eyeTrack.onUpdateFrame
-        }
-        set {
-            self.eyeTrack.onUpdateFrame = newValue
-        }
+        get { eyeTrack.onUpdateFrame }
+        set { eyeTrack.onUpdateFrame = newValue }
     }
 
     public var view: EyeTrackView {
-        get {
-            if self._view == nil {
-                self._view = EyeTrackView(isHidden: isHidden!, eyeTrack: eyeTrack)
-            }
-            return self._view!
-        }
+        if let cached = cachedView { return cached }
+        let v = EyeTrackView(isHidden: isHidden, eyeTrack: eyeTrack)
+        cachedView = v
+        return v
     }
 
-    public init(device: Device, smoothingRange: Int, blinkThreshold: Float, isHidden: Bool?) {
-        self.params = Params(device: device, smoothingRange: smoothingRange, blinkThreshold: blinkThreshold, isHidden: isHidden ?? true)
-        self.eyeTrack = EyeTrack(device: params.device, smoothingRange: params.smoothingRange, blinkThreshold: params.blinkThreshold)
+    public init(device: Device,
+                smoothingRange: Int,
+                blinkThreshold: Float,
+                isHidden: Bool? = true) {
+        self.params = Params(device: device,
+                             smoothingRange: smoothingRange,
+                             blinkThreshold: blinkThreshold,
+                             isHidden: isHidden ?? true)
+        self.eyeTrack = EyeTrack(device: params.device,
+                                 smoothingRange: params.smoothingRange,
+                                 blinkThreshold: params.blinkThreshold)
         self.isHidden = params.isHidden
-        anyCancellable = eyeTrack.objectWillChange.sink { [weak self] (_) in
-            self?.objectWillChange.send()
-        }
+        bindEyeTrack()
         logger.debug("EyeTrackKit was initialized | \(self.params.description)")
     }
 
-    public func start() -> Void {
+    private func bindEyeTrack() {
+        cancellable = eyeTrack.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+    }
+
+    public func start() {
         logger.debug("start eye tracking")
-        self._view?.start()
+        cachedView?.start()
     }
 
-    public func pause() -> Void {
+    public func pause() {
         logger.debug("stop eye tracking")
-        self._view?.pause()
+        cachedView?.pause()
     }
 
-    public func hide() -> Void {
-        self._view?.hide()
+    public func hide() {
+        cachedView?.hide()
     }
 
-    public func show() -> Void {
-        self._view?.show()
+    public func show() {
+        cachedView?.show()
     }
 
-    public func showRayHint() -> Void {
-        self.eyeTrack.showRayHint()
+    public func showRayHint() {
+        eyeTrack.showRayHint()
     }
 
-    public func hideRayHint() -> Void {
-        self.eyeTrack.hideRayHint()
+    public func hideRayHint() {
+        eyeTrack.hideRayHint()
     }
 
-    /// start to record data
-    public func startRecord() -> Void {
+    public func startRecord() {
         logger.debug("start to record scene video")
-        self.view.startRecord()
+        view.startRecord()
     }
 
-    public func stopRecord(finished: @escaping (URL) -> Void = { _ in }, isExport: Bool = false) -> Void {
-        self.view.stopRecord(finished: finished, isExport: isExport)
+    public func stopRecord(finished: @escaping (URL) -> Void = { _ in },
+                           isExport: Bool = false) {
+        view.stopRecord(finished: finished, isExport: isExport)
         logger.debug("stop to record scene video")
     }
 
+    public var currentInfo: EyeTrackInfo? { eyeTrack.info }
 
-    public var currentInfo: EyeTrackInfo? {
-        return self.eyeTrack.info
-    }
+    /// Updates parameters in place where possible, recreating the underlying
+    /// `EyeTrack` only when the device changes (since SceneKit nodes are tied
+    /// to the device).
+    public func reinit(device: Device? = nil,
+                       smoothingRange: Int? = nil,
+                       blinkThreshold: Float? = nil,
+                       isHidden: Bool? = nil) {
+        let deviceChanged = device != nil && device!.type != params.device.type
+        if let device { params.device = device }
+        if let smoothingRange { params.smoothingRange = smoothingRange }
+        if let blinkThreshold { params.blinkThreshold = blinkThreshold }
+        if let isHidden { params.isHidden = isHidden }
+        self.isHidden = params.isHidden
 
-    public func reinit(device: Device?, smoothingRange: Int?, blinkThreshold: Float?, isHidden: Bool?) {
-        self.params.device = device ?? self.params.device
-        self.params.smoothingRange = smoothingRange ?? self.params.smoothingRange
-        self.params.blinkThreshold = blinkThreshold ?? self.params.blinkThreshold
-        self.params.isHidden = isHidden ?? self.params.isHidden
-        self.isHidden = self.params.isHidden
-        self.reset(params: self.params)
+        if deviceChanged {
+            reset(params: params)
+        } else {
+            eyeTrack.smoothingRange = params.smoothingRange
+            eyeTrack.blinkThreshold = params.blinkThreshold
+            eyeTrack.resetFilters()
+        }
     }
 
     public func reset(params: Params) {
-        self.eyeTrack = EyeTrack(device: params.device, smoothingRange: params.smoothingRange, blinkThreshold: params.blinkThreshold)
-        self.isHidden = params.isHidden
-        anyCancellable = eyeTrack.objectWillChange.sink { [weak self] (_) in
-            self?.objectWillChange.send()
-        }
-        self._view = nil
-        logger.debug("EyeTrackKit was initialized | \(params.description)")
+        self.params = params
+        eyeTrack = EyeTrack(device: params.device,
+                            smoothingRange: params.smoothingRange,
+                            blinkThreshold: params.blinkThreshold)
+        isHidden = params.isHidden
+        bindEyeTrack()
+        cachedView = nil
+        logger.debug("EyeTrackKit was reset | \(params.description)")
     }
 }

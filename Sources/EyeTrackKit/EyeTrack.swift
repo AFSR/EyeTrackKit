@@ -12,100 +12,112 @@ import SceneKit
 import ARKit
 import os
 
-@available(iOS 13.0, *)
-public class EyeTrack: ObservableObject {
-    @Published var bufferLookAtPosition: [CGPoint] = []
-    @Published public var lookAtPosition: CGPoint = CGPoint(x: 0, y: 0)
-    @Published public var lookAtPoint: CGPoint = CGPoint(x: 0, y: 0)
+public final class EyeTrack: ObservableObject {
+    // Smoothed gaze position relative to the screen centre.
+    @Published public private(set) var lookAtPosition: CGPoint = .zero
+    // Smoothed gaze position relative to the top-left of the screen.
+    @Published public private(set) var lookAtPoint: CGPoint = .zero
+
     @Published public var device: Device
     @Published public var face: Face
-    @Published public var info: EyeTrackInfo? = nil
+    @Published public private(set) var info: EyeTrackInfo?
     @Published public var isShowRayHint: Bool
 
-    private var sceneView: ARSCNView?
+    /// Tracking quality of the current frame in 0...1.
+    @Published public private(set) var trackingConfidence: Float = 0
 
-    var blinkThreshold: Float
-    var smoothingRange: Int
-    var updateCallback: (EyeTrackInfo?) -> Void = { _ in }
-    var _updateFrame: (CVPixelBuffer?) -> Void = { _ in }
+    public var blinkThreshold: Float
+    public var smoothingRange: Int
 
-    var logger: Logger = Logger(subsystem: "dev.ukitomato.EyeTrackKit", category: "EyeTrack")
+    public var gazeEstimator: GazeEstimator
+    private var ringBuffer: RingBuffer<CGPoint>
+    private var runningSum: CGPoint = .zero
 
-    var onUpdate: (EyeTrackInfo?) -> Void {
-        get {
-            return self.updateCallback
-        }
-        set {
-            self.updateCallback = newValue
-        }
-    }
+    private weak var sceneView: ARSCNView?
 
-    var onUpdateFrame: (CVPixelBuffer?) -> Void {
-        get {
-            return self._updateFrame
-        }
-        set {
-            self._updateFrame = newValue
-        }
-    }
+    public var onUpdate: (EyeTrackInfo?) -> Void = { _ in }
+    public var onUpdateFrame: (CVPixelBuffer?) -> Void = { _ in }
 
-    public init(device: Device, smoothingRange: Int = 1, blinkThreshold: Float = 1.0, isShowRayHint: Bool = false) {
+    private let logger = Logger(subsystem: "dev.ukitomato.EyeTrackKit", category: "EyeTrack")
+
+    public init(device: Device,
+                smoothingRange: Int = 1,
+                blinkThreshold: Float = 1.0,
+                isShowRayHint: Bool = false,
+                gazeEstimator: GazeEstimator = GazeEstimator()) {
         self.device = device
         self.face = Face(isShowRayHint: isShowRayHint)
-        self.smoothingRange = smoothingRange
+        self.smoothingRange = max(1, smoothingRange)
         self.blinkThreshold = blinkThreshold
         self.isShowRayHint = isShowRayHint
+        self.gazeEstimator = gazeEstimator
+        self.ringBuffer = RingBuffer<CGPoint>(capacity: max(1, smoothingRange))
     }
 
-    // SceneViewと紐つける
     public func registerSceneView(sceneView: ARSCNView) {
         self.sceneView = sceneView
-        sceneView.scene.rootNode.addChildNode(self.face.node)
-        sceneView.scene.rootNode.addChildNode(self.device.node)
+        sceneView.scene.rootNode.addChildNode(face.node)
+        sceneView.scene.rootNode.addChildNode(device.node)
     }
 
     public func showRayHint() {
         logger.debug("show raycast hint")
-        self.isShowRayHint = true
-        let old_face = self.face.node
-        self.face = Face(isShowRayHint: true)
-        self.sceneView?.scene.rootNode.replaceChildNode(old_face, with: self.face.node)
+        isShowRayHint = true
+        face.rightEye.showHint()
+        face.leftEye.showHint()
     }
 
     public func hideRayHint() {
         logger.debug("hide raycast hint")
-        self.isShowRayHint = false
-        let old_face = self.face.node
-        self.face = Face(isShowRayHint: false)
-        self.sceneView?.scene.rootNode.replaceChildNode(old_face, with: self.face.node)
+        isShowRayHint = false
+        face.rightEye.hideHint()
+        face.leftEye.hideHint()
     }
 
+    /// Resets the smoothing buffer and the Kalman filters. Call this when
+    /// switching users or after a tracking interruption.
+    public func resetFilters() {
+        ringBuffer.reset()
+        runningSum = .zero
+        gazeEstimator.reset()
+    }
 
-    // ARFaceAnchorを基に情報を更新
     public func update(anchor: ARFaceAnchor) {
-        // 顔座標更新(眼球座標更新)
-        self.face.update(anchor: anchor)
-        // 瞬き判定
-        if self.face.leftEye.blink > blinkThreshold {
-            logger.debug("Close")
-        } else {
-            updateLookAtPosition()
+        face.update(anchor: anchor)
+
+        let isClosed = face.leftEye.blink > blinkThreshold
+                       && face.rightEye.blink > blinkThreshold
+        if !isClosed {
+            updateLookAtPosition(isTracked: anchor.isTracked)
         }
-        self.info = EyeTrackInfo(face: face, device: device, lookAtPoint: lookAtPoint, isTracked: anchor.isTracked)
-        updateCallback(info)
+
+        info = EyeTrackInfo(face: face,
+                            device: device,
+                            lookAtPoint: lookAtPoint,
+                            isTracked: anchor.isTracked,
+                            trackingConfidence: trackingConfidence)
+        onUpdate(info)
     }
 
     public func updateFrame(pixelBuffer: CVPixelBuffer) {
-        self._updateFrame(pixelBuffer)
+        onUpdateFrame(pixelBuffer)
     }
 
-    // 視点位置更新
-    public func updateLookAtPosition() {
-        let rightEyeHittingAt = self.face.rightEye.hittingAt(device: device)
-        let leftEyeHittingAt = self.face.leftEye.hittingAt(device: device)
-        let lookAt = CGPoint(x: (rightEyeHittingAt.x + leftEyeHittingAt.x) / 2, y: -(rightEyeHittingAt.y + leftEyeHittingAt.y) / 2)
-        self.bufferLookAtPosition.append(lookAt)
-        self.lookAtPosition = Array(self.bufferLookAtPosition.suffix(smoothingRange)).average!
-        self.lookAtPoint = CGPoint(x: self.lookAtPosition.x + self.device.screenPointSize.width / 2, y: self.lookAtPosition.y + self.device.screenPointSize.height / 2)
+    private func updateLookAtPosition(isTracked: Bool) {
+        let sample = gazeEstimator.estimate(face: face, device: device, isTracked: isTracked)
+        trackingConfidence = sample.confidence
+
+        // Maintain a running sum over the ring buffer for an O(1) moving average.
+        let evicted = ringBuffer.append(sample.point)
+        runningSum.x += sample.point.x - (evicted?.x ?? 0)
+        runningSum.y += sample.point.y - (evicted?.y ?? 0)
+        let count = CGFloat(ringBuffer.count)
+
+        let smoothed = CGPoint(x: runningSum.x / count, y: runningSum.y / count)
+        lookAtPosition = smoothed
+        lookAtPoint = CGPoint(
+            x: smoothed.x + device.screenPointSize.width / 2,
+            y: smoothed.y + device.screenPointSize.height / 2
+        )
     }
 }

@@ -1,6 +1,6 @@
 //
-//  EyeTrackViewContrller.swift
-//  
+//  EyeTrackViewController.swift
+//
 //
 //  Created by Yuki Yamato on 2020/11/03.
 //
@@ -8,53 +8,66 @@
 import UIKit
 import SceneKit
 import ARKit
-import WebKit
-import ARVideoKit
 
 open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
-    public var sceneView: ARSCNView!
-    public var eyeTrack: EyeTrack!
-    public var recorder: RecordAR?
-    public var isHidden: Bool?
-    
-    public func initialize(isHidden: Bool = true, eyeTrack: EyeTrack) {
+    public private(set) var sceneView: ARSCNView!
+    public private(set) var eyeTrack: EyeTrack!
+    public private(set) var recorder: EyeTrackRecorder?
+    public var isHidden: Bool = true
+
+    private var sync: EyeTrackSceneSync!
+
+    public func initialize(isHidden: Bool = true,
+                           eyeTrack: EyeTrack,
+                           recorderConfiguration: EyeTrackRecorder.Configuration = .default) {
         self.isHidden = isHidden
         self.eyeTrack = eyeTrack
-        let frame = super.view.frame
 
-        // Initialize ARSCNView
-        self.sceneView = ARSCNView(frame: frame)
-        self.view.addSubview(sceneView!)
+        let sceneView = ARSCNView(frame: super.view.frame)
+        self.sceneView = sceneView
+        self.view.addSubview(sceneView)
 
-        // Set the view's delegate
         sceneView.delegate = self
         sceneView.session.delegate = self
         sceneView.isHidden = isHidden
         sceneView.automaticallyUpdatesLighting = true
+        sceneView.rendersContinuously = true
 
-        // Register EyeTrack module
-        self.eyeTrack.registerSceneView(sceneView: sceneView)
-        // Setting recorder
-        self.recorder = RecordAR(ARSceneKit: sceneView)
-    }
-    
-    public func hide() -> Void {
-        self.sceneView.isHidden = true
+        eyeTrack.registerSceneView(sceneView: sceneView)
+        let recorder = EyeTrackRecorder(sceneView: sceneView, configuration: recorderConfiguration)
+        recorder.currentInfoProvider = { [weak eyeTrack] in eyeTrack?.info }
+        self.recorder = recorder
+        sync = EyeTrackSceneSync(eyeTrack: eyeTrack, sceneView: sceneView, recorder: recorder)
     }
 
-    public func show() -> Void {
-        self.sceneView.isHidden = false
+    public func hide() {
+        sceneView.isHidden = true
     }
 
-    // Start to record SceneView content
+    public func show() {
+        sceneView.isHidden = false
+    }
+
     public func startRecord() {
-        recorder?.record()
+        do {
+            try recorder?.startRecording()
+        } catch {
+            print("EyeTrackKit recorder start failed: \(error)")
+        }
     }
 
-    // Stop to record and Save the recorded video
-    public func stopRecord() {
-        recorder?.stopAndExport()
+    public func stopRecord(finished: @escaping (URL) -> Void = { _ in },
+                           isExport: Bool = true) {
+        if isExport {
+            recorder?.stopAndExport { url, _ in
+                if let url { finished(url) }
+            }
+        } else {
+            recorder?.stop { url in
+                if let url { finished(url) }
+            }
+        }
     }
 
     open override func viewDidLoad() {
@@ -63,81 +76,49 @@ open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessio
 
     open override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // Create a session configuration
         let configuration = ARFaceTrackingConfiguration()
         configuration.isLightEstimationEnabled = true
-
-        // Setting recorder
-        self.recorder?.prepare(configuration)
-
-        // Run the view's session
-        self.sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        if ARFaceTrackingConfiguration.supportsWorldTracking {
+            configuration.isWorldTrackingEnabled = true
+        }
+        sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     }
 
     open override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Pause recording
-        recorder?.rest()
-        // Pause the view's session
         sceneView.session.pause()
-
     }
 
-    // MARK: - ARSCNViewDelegate
+    // MARK: - ARSessionDelegate
 
+    open func session(_ session: ARSession, didFailWithError error: Error) { }
+    open func sessionWasInterrupted(_ session: ARSession) { }
+    open func sessionInterruptionEnded(_ session: ARSession) { }
 
-    open func session(_ session: ARSession, didFailWithError error: Error) {
-        // Present an error message to the user
-
+    public func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        sync.handleSession(didUpdate: frame)
     }
 
-    open func sessionWasInterrupted(_ session: ARSession) {
-        // Inform the user that the session has been interrupted, for example, by presenting an overlay
+    // Override hook for subclasses to react to anchor updates.
+    open func updateViewWithUpdateAnchor() { }
 
-    }
-
-    open func sessionInterruptionEnded(_ session: ARSession) {
-        // Reset tracking and/or remove existing anchors if consistent tracking is required
-
-    }
-
-    // Update Some View when updating Face Anchor
-    open func updateViewWithUpdateAnchor() {
-    }
-}
-
-
-extension EyeTrackViewController {
+    // MARK: - ARSCNViewDelegate / SCNSceneRendererDelegate
 
     public func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
-        self.eyeTrack.face.node.transform = node.transform
-        guard let faceAnchor = anchor as? ARFaceAnchor else {
-            return
-        }
-        updateAnchor(withFaceAnchor: faceAnchor)
-    }
-
-    public func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        guard let sceneTransformInfo = sceneView.pointOfView?.transform else {
-            return
-        }
-        // Update Virtual Device position
-        self.eyeTrack.device.node.transform = sceneTransformInfo
+        sync.handleAdd(node: node, anchor: anchor)
     }
 
     public func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
-        self.eyeTrack.face.node.transform = node.transform
-        guard let faceAnchor = anchor as? ARFaceAnchor else {
-            return
-        }
-        updateAnchor(withFaceAnchor: faceAnchor)
+        sync.handleUpdate(node: node, anchor: anchor)
     }
 
-    public func updateAnchor(withFaceAnchor anchor: ARFaceAnchor) {
-        DispatchQueue.main.async {
-            self.eyeTrack.update(anchor: anchor)
-        }
+    public func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        sync.handleSceneTick()
+    }
+
+    public func renderer(_ renderer: SCNSceneRenderer,
+                         didRenderScene scene: SCNScene,
+                         atTime time: TimeInterval) {
+        sync.handleDidRenderScene(at: time)
     }
 }
-
-

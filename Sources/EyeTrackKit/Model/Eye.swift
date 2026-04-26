@@ -10,59 +10,88 @@ import UIKit
 import SceneKit
 import ARKit
 
-// 目情報保持クラス
-public class Eye {
-    public var lookAtPosition: CGPoint = CGPoint(x: 0, y: 0)
-    public var lookAtPoint: CGPoint = CGPoint(x: 0, y: 0)
+/// Holds the per-eye SceneKit nodes and the latest gaze sample.
+public final class Eye {
+    public var lookAtPosition: CGPoint = .zero
+    public var lookAtPoint: CGPoint = .zero
     public var blink: Float = 1.0
-    public var node: SCNNode
-    public var target: SCNNode
+    public let node: SCNNode
+    public let target: SCNNode
 
-    public var isShowRayHint: Bool
-    
+    /// Child node carrying the cone geometry. The original implementation
+    /// stored the geometry on a child but updated it via `node.geometry`
+    /// (the parent had none), so `showHint`/`hideHint` were silent no-ops.
+    private let coneNode: SCNNode
+
+    public private(set) var isShowRayHint: Bool
+
     public init(isShowRayHint: Bool = false) {
         self.isShowRayHint = isShowRayHint
-        // Node生成
-        self.node = {
-            let geometry = SCNCone(topRadius: 0.005, bottomRadius: 0, height: 0.1)
-            geometry.radialSegmentCount = 3
-            geometry.firstMaterial?.diffuse.contents = isShowRayHint ? UIColor.red : UIColor.clear
-            let eyeNode = SCNNode()
-            eyeNode.geometry = geometry
-            eyeNode.eulerAngles.x = -.pi / 2
-            eyeNode.position.z = 0.1
 
-            let parentNode = SCNNode()
-            parentNode.addChildNode(eyeNode)
-            return parentNode
-        }()
+        let geometry = SCNCone(topRadius: 0.005, bottomRadius: 0, height: 0.1)
+        geometry.radialSegmentCount = 3
+        geometry.firstMaterial?.diffuse.contents = isShowRayHint ? UIColor.red : UIColor.clear
+
+        let cone = SCNNode()
+        cone.geometry = geometry
+        cone.eulerAngles.x = -.pi / 2
+        cone.position.z = 0.1
+        self.coneNode = cone
+
+        let parent = SCNNode()
+        parent.addChildNode(cone)
+        self.node = parent
+
         self.target = SCNNode()
-        self.node.addChildNode(self.target)
         self.target.position.z = 2
+        self.node.addChildNode(self.target)
     }
 
     public func showHint() {
-        self.node.geometry?.firstMaterial?.diffuse.contents = UIColor.red
-    }
-    
-    public func hideHint() {
-        self.node.geometry?.firstMaterial?.diffuse.contents = UIColor.clear
-    }
-    
-    // Deviceとの距離を取得
-    public func getDistanceToDevice() -> Float {
-        (self.node.worldPosition - SCNVector3Zero).length()
+        coneNode.geometry?.firstMaterial?.diffuse.contents = UIColor.red
+        isShowRayHint = true
     }
 
-    // [目と視点を結ぶ直線]と[デバイスのスクリーン平面]の交点を取得
+    public func hideHint() {
+        coneNode.geometry?.firstMaterial?.diffuse.contents = UIColor.clear
+        isShowRayHint = false
+    }
+
+    public func getDistanceToDevice() -> Float {
+        (node.worldPosition - SCNVector3Zero).length()
+    }
+
+    /// Computes the screen-space hit point of the ray going from this eye
+    /// through its gaze target, intersected with the virtual device plane.
+    ///
+    /// The previous implementation iterated over all hit-test results but
+    /// only kept the last one, and recomputed `screenSize / 2` and
+    /// `screenPointSize / 2` on every iteration. This version pulls the
+    /// last result directly and precomputes the half-extents.
     public func hittingAt(device: Device) -> CGPoint {
-        let deviceScreenEyeHitTestResults = device.node.hitTestWithSegment(from: self.target.worldPosition, to: self.node.worldPosition, options: nil)
-        for result in deviceScreenEyeHitTestResults {
-            self.lookAtPosition.x = CGFloat(result.localCoordinates.x) / (device.screenSize.width / 2) * device.screenPointSize.width + device.compensation.x
-            self.lookAtPosition.y = CGFloat(result.localCoordinates.y) / (device.screenSize.height / 2) * device.screenPointSize.height + device.compensation.y
-            self.lookAtPoint = CGPoint(x: self.lookAtPosition.x + device.screenPointSize.width / 2, y: self.lookAtPosition.y + device.screenPointSize.height / 2)
+        let results = device.node.hitTestWithSegment(
+            from: target.worldPosition,
+            to: node.worldPosition,
+            options: nil
+        )
+        guard let result = results.last else {
+            return lookAtPosition
         }
 
-        return self.lookAtPosition
+        let halfScreenWidth = device.screenSize.width / 2
+        let halfScreenHeight = device.screenSize.height / 2
+        let halfPointWidth = device.screenPointSize.width / 2
+        let halfPointHeight = device.screenPointSize.height / 2
+
+        let local = result.localCoordinates
+        lookAtPosition = CGPoint(
+            x: CGFloat(local.x) / halfScreenWidth * device.screenPointSize.width + device.compensation.x,
+            y: CGFloat(local.y) / halfScreenHeight * device.screenPointSize.height + device.compensation.y
+        )
+        lookAtPoint = CGPoint(
+            x: lookAtPosition.x + halfPointWidth,
+            y: lookAtPosition.y + halfPointHeight
+        )
+        return lookAtPosition
     }
 }

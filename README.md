@@ -1,37 +1,26 @@
 EyeTrackKit
 ====
-- An iOS Framework that enables developers to use eye track information with ARKit content.
+Eye tracking framework for iOS that uses the TrueDepth camera (Face ID hardware)
+through ARKit. Designed to be embedded in third-party apps:
 
-## Key Features
-- Acquire eye tracking info
-    - face position & rotation
-    - eyes position
-    - lookAtPosition in World
-    - lookAtPoint on device screen
-    - blink
-    - distance
-    - tracking confidence (multi-source gaze fusion)
-- Record AR scene to video (built-in `AVAssetWriter` + Metal pipeline, no third-party dependency)
+- Multi-source gaze fusion (raycast + Apple's lookAtPoint + blend-shape angles)
+- Per-axis Kalman filter, outlier-robust
+- User calibration with JSON import/export
+- Combine `Publisher` and Swift `AsyncStream` for gaze and tracking events
+- Video recording with optional CSV sidecar synchronised to video timestamps
+- Zero third-party dependencies — only Apple frameworks
 
 ## Compatibility
-`EyeTrackKit` is compatible on iOS devices that support [`ARKit`](https://developer.apple.com/documentation/arkit) face tracking (TrueDepth camera required).
+- iOS 16+, Swift 5.9+
+- TrueDepth camera required (`EyeTrackKit.isSupported`)
 
-`EyeTrackKit` requires:
-- SwiftUI
-- iOS 16+
-- Swift 5.9 or higher
-
-## Installation
-### Swift Package Manager
-
-1. In Xcode, select File > Add Package Dependencies…
-2. Use this repository's URL.
-
-EyeTrackKit has **zero external dependencies** — only Apple frameworks
-(`ARKit`, `SceneKit`, `AVFoundation`, `Metal`, `Photos`, `SwiftUI`).
+## Installation (Swift Package Manager)
+```
+File > Add Package Dependencies… > <repository URL>
+```
 
 ### Required Info.plist usage descriptions
-```
+```xml
 <key>NSCameraUsageDescription</key>
 <string>AR face tracking</string>
 <key>NSPhotoLibraryAddUsageDescription</key>
@@ -40,44 +29,130 @@ EyeTrackKit has **zero external dependencies** — only Apple frameworks
 <string>(only if you add audio recording)</string>
 ```
 
-## Recording
-
-The built-in `EyeTrackRecorder` captures the rendered `ARSCNView` content
-directly via `SCNRenderer` and `AVAssetWriter`. Frames are pulled from a
-pre-warmed IOSurface-backed `CVPixelBufferPool` and rendered to a
-zero-copy Metal texture, so capture is GPU-bound and does not stall the
-main thread.
-
-Default codec is HEVC at 6 Mbps. Override via
-`EyeTrackRecorder.Configuration` when constructing the view:
+## Quick start
 
 ```swift
-EyeTrackController(
+import EyeTrackKit
+
+guard EyeTrackKit.isSupported else { /* fail-fast */ return }
+try await EyeTrackKit.requestAuthorization()
+
+let controller = EyeTrackController(
     device: Device(type: .iPhone15Pro),
     smoothingRange: 5,
     blinkThreshold: 0.5,
-    isHidden: false
+    coordinateSpace: .screenPoints,
+    autoPauseInBackground: true
 )
+
+// Modern event APIs
+let cancellable = controller.gazeEvents.publisher.sink { event in
+    print(event.point, event.confidence)
+}
+
+Task {
+    for await event in controller.events.stream {
+        switch event {
+        case .fixation(let point, let duration, _):
+            print("fixation at \(point) for \(duration)s")
+        case .blink(let side):
+            print("blink \(side)")
+        case .faceLost: print("face lost")
+        default: break
+        }
+    }
+}
 ```
 
-## Gaze tracking
+## Calibration
 
-`GazeEstimator` fuses three TrueDepth-derived signals per frame:
+```swift
+let calibrator = Calibrator(
+    eyeTrack: controller.eyeTrack,
+    targets: Calibrator.standardTargets(.nineGrid, in: screenSize)
+)
+calibrator.start()
+// Drive the calibrator from your UI: show the target at calibrator.state's
+// targetIndex, wait until calibrator.collectedCount >= samplesPerTarget,
+// then call calibrator.advance().
+let profile = try calibrator.finish()
+let url = try CalibrationStore.shared.save(profile)
+controller.calibrationProfile = profile
 
-1. Geometric raycast through each pupil (legacy method)
-2. `ARFaceAnchor.lookAtPoint` — Apple's native gaze hint
-3. Eye yaw/pitch reconstructed from `eyeLookIn/Out/Up/Down` blend shapes
+// Later, in another session:
+try controller.loadCalibrationProfile(from: url)
+```
 
-Each estimate is fed to a per-axis 1-D Kalman filter, and outliers are
-down-weighted using the inter-source median distance. The resulting
-`trackingConfidence` (0…1) is exposed on `EyeTrack` and `EyeTrackInfo`.
+A `CalibrationProfile` is a Codable JSON file with:
+- schema version, profile UUID
+- device type and screen size at calibration time
+- the raw samples
+- the fitted 2D affine transform
+- per-target residual error in screen points (`meanResidual`, `maxResidual`)
 
-## Develop Environment
-- Language: [Swift](https://developer.apple.com/swift/)
-- Frameworks: [ARKit](https://developer.apple.com/documentation/arkit/), AVFoundation, Metal, SceneKit
+## Configuration bundle
+
+All tunable parameters can be encoded to a single JSON file, ideal for
+shipping per-app defaults:
+
+```swift
+var config = EyeTrackKit.Configuration.default
+config.smoothingRange = 7
+config.coordinateSpace = .normalized
+config.recorder.codec = .hevc
+config.recorder.writeSidecarCSV = true
+try config.write(to: url)
+
+let loaded = try EyeTrackKit.Configuration.read(from: url)
+let controller = EyeTrackController(configuration: loaded)
+```
+
+## Recording
+
+`EyeTrackRecorder` captures the rendered ARSCNView via `SCNRenderer` into a
+zero-copy Metal texture, encoded with `AVAssetWriter` (HEVC at 6 Mbps by
+default). When `writeSidecarCSV` is enabled, a `<video>.csv` is written
+alongside the MP4, with one row per encoded frame and the same time
+origin as the video.
+
+```swift
+controller.startRecord()
+// …
+controller.stopRecord(finished: { url in
+    print("video at \(url)")
+}, isExport: false)
+```
+
+## SwiftUI gaze targeting
+
+```swift
+import EyeTrackKit
+
+Button("Activate") { activate() }
+    .onGazeEnter(eyeTrack: controller.eyeTrack, dwell: 0.5) {
+        activate()
+    }
+    .onGazeExit(eyeTrack: controller.eyeTrack) {
+        // …
+    }
+```
+
+## UIKit gaze hit-testing
+
+```swift
+let hit = view.gazeHitTest(controller.eyeTrack.lookAtPoint)
+let inside = view.gazeContains(controller.eyeTrack.lookAtPoint)
+```
+
+## Background / foreground
+
+When `autoPauseInBackground: true` (default), the controller pauses the
+ARSession on `UIApplication.didEnterBackgroundNotification` and resumes
+on `willEnterForegroundNotification`. Filters and the Kalman state are
+reset on resume to avoid stale predictions.
 
 ## Licence
-[MIT](https://github.com/ukitomato/EyeTrackKit/blob/master/LICENSE)
+[MIT](LICENSE)
 
-## Author
+## Original author
 Yuki Yamato [[ukitomato](https://github.com/ukitomato)]

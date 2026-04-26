@@ -36,6 +36,7 @@ open class EyeTrackViewController: UIViewController, ARSCNViewDelegate, ARSessio
 
         eyeTrack.registerSceneView(sceneView: sceneView)
         let recorder = EyeTrackRecorder(sceneView: sceneView, configuration: recorderConfiguration)
+        recorder.currentInfoProvider = { [weak eyeTrack] in eyeTrack?.info }
         self.recorder = recorder
         sync = EyeTrackSceneSync(eyeTrack: eyeTrack, sceneView: sceneView, recorder: recorder)
     }

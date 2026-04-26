@@ -120,6 +120,7 @@ public struct EyeTrackView: UIViewRepresentable {
                                           sceneView: sceneView,
                                           recorder: recorder)
             super.init()
+            recorder.currentInfoProvider = { [weak eyeTrack] in eyeTrack?.info }
             eyeTrack.registerSceneView(sceneView: sceneView)
         }
 

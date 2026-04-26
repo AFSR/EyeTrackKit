@@ -46,15 +46,20 @@ public final class EyeTrackRecorder {
         public var videoBitRate: Int
         public var maxKeyFrameInterval: Int
         public var outputDirectory: URL?
+        /// When `true`, a `<videoName>.csv` is written alongside the video,
+        /// containing one row per encoded frame (see `VideoSidecarWriter`).
+        public var writeSidecarCSV: Bool
 
         public init(codec: Codec = .hevc,
                     videoBitRate: Int = 6_000_000,
                     maxKeyFrameInterval: Int = 60,
-                    outputDirectory: URL? = nil) {
+                    outputDirectory: URL? = nil,
+                    writeSidecarCSV: Bool = false) {
             self.codec = codec
             self.videoBitRate = videoBitRate
             self.maxKeyFrameInterval = maxKeyFrameInterval
             self.outputDirectory = outputDirectory
+            self.writeSidecarCSV = writeSidecarCSV
         }
 
         public static let `default` = Configuration()
@@ -62,6 +67,14 @@ public final class EyeTrackRecorder {
 
     public private(set) var isRecording: Bool = false
     public var configuration: Configuration
+
+    /// Optional callback the recorder invokes on every captured frame to
+    /// fetch the latest tracking info, written to the sidecar CSV. Set this
+    /// before calling `startRecording()`.
+    public var currentInfoProvider: (() -> EyeTrackInfo?)?
+
+    /// URL of the most recent recording (set when `startRecording` succeeds).
+    public private(set) var lastOutputURL: URL?
 
     private weak var sceneView: ARSCNView?
     private var renderer: SCNRenderer?
@@ -72,6 +85,7 @@ public final class EyeTrackRecorder {
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var sidecar: VideoSidecarWriter?
 
     private var sessionStartTime: CMTime?
     private var outputURL: URL?
@@ -187,8 +201,19 @@ public final class EyeTrackRecorder {
         self.renderer = scnRenderer
         self.commandQueue = queue
         self.outputURL = url
+        self.lastOutputURL = url
         self.sessionStartTime = nil
         self.isRecording = true
+
+        if configuration.writeSidecarCSV {
+            let sidecar = VideoSidecarWriter(videoURL: url)
+            do {
+                try sidecar.start()
+                self.sidecar = sidecar
+            } catch {
+                logger.warning("sidecar start failed: \(error.localizedDescription)")
+            }
+        }
 
         logger.debug("Recording started: \(url.lastPathComponent) @ \(pixelWidth)x\(pixelHeight)")
     }
@@ -258,6 +283,10 @@ public final class EyeTrackRecorder {
         }
 
         adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
+
+        if let sidecar, let info = currentInfoProvider?() {
+            sidecar.append(info: info, at: scnTime)
+        }
     }
 
     public func stop(completion: @escaping (URL?) -> Void) {
@@ -272,6 +301,7 @@ public final class EyeTrackRecorder {
         lock.unlock()
 
         input.markAsFinished()
+        sidecar?.stop()
         writer.finishWriting { [weak self] in
             self?.releaseResources()
             DispatchQueue.main.async { completion(url) }
@@ -300,7 +330,11 @@ public final class EyeTrackRecorder {
 
         input.markAsFinished()
         writer.cancelWriting()
-        if let url { try? FileManager.default.removeItem(at: url) }
+        sidecar?.stop()
+        if let url {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("csv"))
+        }
         releaseResources()
     }
 
@@ -317,6 +351,7 @@ public final class EyeTrackRecorder {
         renderer = nil
         commandQueue = nil
         sessionStartTime = nil
+        sidecar = nil
     }
 
     private func exportToPhotoLibrary(url: URL, completion: @escaping (URL?, Error?) -> Void) {
